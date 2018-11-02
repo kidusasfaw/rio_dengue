@@ -1,0 +1,425 @@
+---
+title: "Final Project - POMP modeling dengue in San Juan, Puerto Rico"
+author: "Kidus Asfaw"
+date: "4/16/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(pomp)
+library(readr)
+library(dplyr)
+# setwd('/afs/umich.edu/k/a/kasfaw/stats531/final_project')
+```
+
+## Data Loading
+
+```{r}
+sj_dengue = read_csv('http://dengueforecasting.noaa.gov/Training/San_Juan_Training_Data.csv')
+sj_dengue = sj_dengue %>% mutate(total_other = other_positive_cases + additional_cases, week = 0:(nrow(sj_dengue)-1))
+for(i in 7:nrow(sj_dengue)){
+  unassigned = sj_dengue$total_other[i]
+  sum_prev5_days = sj_dengue[c(
+    'denv1_cases', 'denv2_cases','denv3_cases','denv4_cases')][(i-5):(i-1),] %>%
+    apply(2, sum)
+  assignment = rmultinom(1, unassigned, sum_prev5_days)
+  sj_dengue[i,]$denv1_cases = sj_dengue[i,]$denv1_cases + assignment['denv1_cases', 1]
+  sj_dengue[i,]$denv2_cases = sj_dengue[i,]$denv2_cases + assignment['denv2_cases', 1]
+  sj_dengue[i,]$denv3_cases = sj_dengue[i,]$denv3_cases + assignment['denv3_cases', 1]
+  sj_dengue[i,]$denv4_cases = sj_dengue[i,]$denv4_cases + assignment['denv4_cases', 1]
+}
+dd = sj_dengue %>% select(week, y1 = denv1_cases, y2 = denv2_cases, y3 = denv3_cases, y4 = denv4_cases)
+dd_test = dd[1:10,]
+```
+
+## Deterministic Skeleton
+
+```{r}
+dengue_skel <- Csnippet('
+                        int numstrains = 4;
+// initialize all the phis and gammas
+                        double phi12, phi13, phi14, phi21, phi23, phi24, phi31, phi32, phi34, phi41, phi42, phi43;
+                        phi12 = phi13 = phi14 = phi21 = phi23 = phi24 = phi31 = phi32 = phi34 = phi41 = phi42 = phi43 = phi;
+                        double gamma12, gamma13, gamma14, gamma21, gamma23, gamma24, gamma31, gamma32, gamma34, gamma41, gamma42, gamma43;
+                        gamma12 = gamma13 = gamma14 = gamma21 = gamma23 = gamma24 = gamma31 = gamma32 = gamma34 = gamma41 = gamma42 = gamma43 = Gamma;
+// for now mu, sigma and bet are fixed
+                        double mu = 1/(70*365);
+                        double sigma = 1/3.65;
+                        double bet = 400/365;
+                         double phis[4][4] = {{0, phi12, phi13, phi14}, {phi21, 0, phi23, phi24}, {phi31, phi32, 0, phi34}, {phi41, phi42, phi43, 0}};
+                         double n_sec[4][4] = {{0, n12, n13, n14}, {n21, 0, n23, n24}, {n31, n32, 0, n34}, {n41, n42, n43, 0}};
+                         double gammas[4][4] = {{0, gamma12, gamma13, gamma14}, {gamma21, 0, gamma23, gamma24}, {gamma31, gamma32, 0, gamma34}, {gamma41, gamma42, gamma43, 0}};
+                         double lambdas[4] = {0, 0, 0, 0};
+                         double n[4] = {n1, n2, n3, n4};
+                         double rs[4] = {r1, r2, r3, r4};
+                         double deltas[10];
+                         double deltas_sec[4][4];
+                         double sum_lambdas = 0;
+                         double sumprod = 0;
+                         double sumprodtwo = 0;
+                         for(int i = 0; i < numstrains; i++){
+                            sumprod = 0;
+                            for(int j = 0; j < numstrains; j++){
+                               if(i == j){
+                                  sumprod += 0;
+                               }
+                               else{
+                                  sumprod += phis[j][i]*n_sec[j][i];
+                               }
+                            }
+                            lambdas[i] = bet*(n[i] + sumprod);
+                            sum_lambdas += lambdas[i];
+                         }
+                         for(int i = 0; i < numstrains; i++){
+                            sumprodtwo = 0;
+                            for(int j = 0; j < numstrains; j++){
+                               if(i != j){
+                                  sumprodtwo += gammas[i][j]*lambdas[j];
+                               }
+                            }
+                            deltas[i+5] = sigma*n[i] - (rs[i]*(mu + sumprodtwo));
+                         }
+                         deltas[0] = mu - s*sum_lambdas - mu*s;
+                         for(int i = 0; i<numstrains; i++){
+                            deltas[i+1] = s*lambdas[i] - (sigma + mu)*n[i];
+                         }
+                         double sum_ys = 0;
+                         for(int i = 0; i<numstrains; i++){
+                            for(int j = 0; j<numstrains; j++){
+                               if(i == j) {
+                                  deltas_sec[i][j] = 0;
+                               }
+                               else{
+                                  deltas_sec[i][j] = rs[i]*gammas[i][j]*lambdas[j] - (sigma + mu)*n_sec[i][j];
+                                  sum_ys += n_sec[i][j];
+                               }
+                            }
+                         }
+                         deltas[9] = sigma*sum_ys - mu*r;
+                         Ds = (s + deltas[0]);
+                         Dn1 = (n1 + deltas[1]);
+                         Dn2 = (n2 + deltas[2]);
+                         Dn3 = (n3 + deltas[3]);
+                         Dn4 = (n4 + deltas[4]);
+                         Dr1 = (r1 + deltas[5]);
+                         Dr2 = (r2 + deltas[6]);
+                         Dr3 = (r3 + deltas[7]);
+                         Dr4 = (r4 + deltas[8]);
+                         Dr = (r + deltas[9]);
+                         Dn12 = (n12 + deltas_sec[0][1]);
+                         Dn13 = (n13 + deltas_sec[0][2]);
+                         Dn14 = (n14 + deltas_sec[0][3]);
+                         Dn21 = (n21 + deltas_sec[1][0]);
+                         Dn23 = (n23 + deltas_sec[1][2]);
+                         Dn24 = (n24 + deltas_sec[1][3]);
+                         Dn31 = (n31 + deltas_sec[2][0]);
+                         Dn32 = (n32 + deltas_sec[2][1]);
+                         Dn34 = (n34 + deltas_sec[2][3]);
+                         Dn41 = (n41 + deltas_sec[3][0]);
+                         Dn42 = (n42 + deltas_sec[3][1]);
+                         Dn43 = (n43 + deltas_sec[3][2]);
+                         ')
+
+```
+
+## rprocess
+
+```{r}
+dengue_rprocess <- Csnippet('
+                        int numstrains = 4;
+                        int population = 2217968;
+
+                        // initialize all the phis and gammas
+                        double phi12, phi13, phi14, phi21, phi23, phi24, phi31, phi32, phi34, phi41, phi42, phi43;
+                        phi12 = phi13 = phi14 = phi21 = phi23 = phi24 = phi31 = phi32 = phi34 = phi41 = phi42 = phi43 = phi;
+                        double gamma12, gamma13, gamma14, gamma21, gamma23, gamma24, gamma31, gamma32, gamma34, gamma41, gamma42, gamma43;
+                        gamma12 = gamma13 = gamma14 = gamma21 = gamma23 = gamma24 = gamma31 = gamma32 = gamma34 = gamma41 = gamma42 = gamma43 = Gamma;
+
+                        // for now mu, sigma and bet are fixed
+                        double mu = 1/(70*365);
+                        double sigma = 1/3.65;
+                        double bet = 400/365;
+
+                        // useful for calculations
+                        double phis[4][4] = {{0, phi12, phi13, phi14}, {phi21, 0, phi23, phi24}, {phi31, phi32, 0, phi34}, {phi41, phi42, phi43, 0}};
+                        double n_sec[4][4] = {{0, n12, n13, n14}, {n21, 0, n23, n24}, {n31, n32, 0, n34}, {n41, n42, n43, 0}};
+                        double lambdas[4] = {0, 0, 0, 0};
+                        double n[4] = {n1, n2, n3, n4};
+                        double sumprod = 0;
+                        double s_rate[5], s_trans[5], p_inf_rate[8], p_inf_trans[8], r_rate[16], r_trans[16], s_inf_rate[24], s_inf_trans[24], rec_rate[1], rec_trans[1];
+                        int sum_deaths = 0;
+                        int births;
+
+                        // calculate foi for each strain
+                        for(int i = 0; i < numstrains; i++){
+                          sumprod = 0;
+                          for(int j = 0; j < numstrains; j++){
+                            if(i == j){
+                              sumprod += 0;
+                            }
+                            else{
+                              sumprod += phis[j][i]*n_sec[j][i];
+                            }
+                          }
+                          lambdas[i] = bet*(n[i] + sumprod);
+                        }
+                        
+                        // rates from S to primary I
+                        s_rate[0] = lambdas[0]; // to I1
+                        s_rate[1] = lambdas[1]; // to I2
+                        s_rate[2] = lambdas[2]; // to I3
+                        s_rate[3] = lambdas[3]; // to I4
+                        s_rate[4] = mu; // natural death
+
+                        // transitions from S to primary I
+                        reulermultinom(5, floor(s*population), &s_rate[0], 1, &s_trans[0]);
+                        //printf("%f",floor(s*population));
+                        //printf(" ");
+                        //printf("%f", s_trans[0]);
+                        //printf(" ");
+                        //printf("%f", s_trans[1]);
+                        //printf(" ");
+                        //printf("%f", s_trans[2]);
+                        //printf(" ");
+                        //printf("%f", s_trans[3]);
+                        //printf(" ");
+                        //printf("%f", s_trans[4]);
+                        //printf("End One ");
+                        // rates from I_i to R_i and death
+                        p_inf_rate[0] = sigma;
+                        p_inf_rate[1] = mu;
+                        p_inf_rate[2] = sigma;
+                        p_inf_rate[3] = mu;
+                        p_inf_rate[4] = sigma;
+                        p_inf_rate[5] = mu;
+                        p_inf_rate[6] = sigma;
+                        p_inf_rate[7] = mu;
+
+                        // transitions from I_i to R_i and death
+                        reulermultinom(2, floor(n[0]*population), &p_inf_rate[0], 1, &p_inf_trans[0]);
+                        reulermultinom(2, floor(n[1]*population), &p_inf_rate[2], 1, &p_inf_trans[2]);
+                        reulermultinom(2, floor(n[2]*population), &p_inf_rate[4], 1, &p_inf_trans[4]);
+                        reulermultinom(2, floor(n[3]*population), &p_inf_rate[6], 1, &p_inf_trans[6]);
+
+                        // rates from R_i to I_ij and death
+                        r_rate[0] = gamma12*lambdas[1];
+                        r_rate[1] = gamma13*lambdas[2];
+                        r_rate[2] = gamma14*lambdas[3];
+                        r_rate[3] = mu;
+                        r_rate[4] = gamma21*lambdas[0];
+                        r_rate[5] = gamma23*lambdas[2];
+                        r_rate[6] = gamma24*lambdas[3];
+                        r_rate[7] = mu;
+                        r_rate[8] = gamma31*lambdas[0];
+                        r_rate[9] = gamma32*lambdas[1];
+                        r_rate[10] = gamma34*lambdas[3];
+                        r_rate[11] = mu;
+                        r_rate[12] = gamma41*lambdas[0];
+                        r_rate[13] = gamma42*lambdas[1];
+                        r_rate[14] = gamma43*lambdas[2];
+                        r_rate[15] = mu;
+                        
+                        // transitions from R_i to I_ij and death
+                        reulermultinom(4, floor(r1*population), &r_rate[0], 1, &r_trans[0]);
+                        reulermultinom(4, floor(r2*population), &r_rate[4], 1, &r_trans[4]);
+                        reulermultinom(4, floor(r3*population), &r_rate[8], 1, &r_trans[8]);
+                        reulermultinom(4, floor(r4*population), &r_rate[12], 1, &r_trans[12]);
+                        
+                        // rates from I_ij to R
+                        s_inf_rate[0] = sigma;
+                        s_inf_rate[1] = mu;
+                        s_inf_rate[2] = sigma;
+                        s_inf_rate[3] = mu;
+                        s_inf_rate[4] = sigma;
+                        s_inf_rate[5] = mu;
+                        s_inf_rate[6] = sigma;
+                        s_inf_rate[7] = mu;
+                        s_inf_rate[8] = sigma;
+                        s_inf_rate[9] = mu;
+                        s_inf_rate[10] = sigma;
+                        s_inf_rate[11] = mu;
+                        s_inf_rate[12] = sigma;
+                        s_inf_rate[13] = mu;
+                        s_inf_rate[14] = sigma;
+                        s_inf_rate[15] = mu;
+                        s_inf_rate[16] = sigma;
+                        s_inf_rate[17] = mu;
+                        s_inf_rate[18] = sigma;
+                        s_inf_rate[19] = mu;
+                        s_inf_rate[20] = sigma;
+                        s_inf_rate[21] = mu;
+                        s_inf_rate[22] = sigma;
+                        s_inf_rate[23] = mu;
+
+                        // transitions from secondary infection to permanent recovery
+                        reulermultinom(2, floor(n12*population), &s_inf_rate[0], 1, &s_inf_trans[0]);
+                        reulermultinom(2, floor(n13*population), &s_inf_rate[2], 1, &s_inf_trans[2]);                        
+                        reulermultinom(2, floor(n14*population), &s_inf_rate[4], 1, &s_inf_trans[4]);
+                        reulermultinom(2, floor(n21*population), &s_inf_rate[6], 1, &s_inf_trans[6]);
+                        reulermultinom(2, floor(n23*population), &s_inf_rate[8], 1, &s_inf_trans[8]);
+                        reulermultinom(2, floor(n24*population), &s_inf_rate[10], 1, &s_inf_trans[10]);
+                        reulermultinom(2, floor(n31*population), &s_inf_rate[12], 1, &s_inf_trans[12]);
+                        reulermultinom(2, floor(n32*population), &s_inf_rate[14], 1, &s_inf_trans[14]);
+                        reulermultinom(2, floor(n34*population), &s_inf_rate[16], 1, &s_inf_trans[16]);
+                        reulermultinom(2, floor(n41*population), &s_inf_rate[18], 1, &s_inf_trans[18]);
+                        reulermultinom(2, floor(n42*population), &s_inf_rate[20], 1, &s_inf_trans[20]);
+                        reulermultinom(2, floor(n43*population), &s_inf_rate[22], 1, &s_inf_trans[22]);
+
+                        // rate from permanent recovery to death
+                        rec_rate[0] = mu;
+
+                        // transitions from permanent recovery to death
+                        reulermultinom(1, floor(r*population), &rec_rate[0], 1, &rec_trans[0]);
+                        
+                        // updates
+                        // add up natural deaths from each box
+                        sum_deaths = s_trans[4] + p_inf_trans[1] + p_inf_trans[3] + p_inf_trans[5] + p_inf_trans[7] + r_trans[3] + r_trans[7] + r_trans[11] + r_trans[15] + s_inf_trans[1] + s_inf_trans[3] + s_inf_trans[5] + s_inf_trans[7] + s_inf_trans[9] + s_inf_trans[11] + s_inf_trans[13] + s_inf_trans[15] + s_inf_trans[17] + s_inf_trans[19] + s_inf_trans[21] + s_inf_trans[23] + rec_trans[0];
+                        births = sum_deaths;
+                     
+                        // updates
+                        s += (births - s_trans[0] - s_trans[1] - s_trans[2] - s_trans[3] - s_trans[4])/population;
+                        n1 += (s_trans[0] - p_inf_trans[0] - p_inf_trans[1])/population;
+                        n2 += (s_trans[1] - p_inf_trans[2] - p_inf_trans[3])/population;
+                        n3 += (s_trans[2] - p_inf_trans[4] - p_inf_trans[5])/population;
+                        n4 += (s_trans[3] - p_inf_trans[6] - p_inf_trans[7])/population;
+                        r1 += (p_inf_trans[0] - r_trans[0] - r_trans[1] - r_trans[2] - r_trans[3])/population;
+                        r2 += (p_inf_trans[2] - r_trans[4] - r_trans[5] - r_trans[6] - r_trans[7])/population;
+                        r3 += (p_inf_trans[4] - r_trans[8] - r_trans[9] - r_trans[10] - r_trans[11])/population;
+                        r4 += (p_inf_trans[6] - r_trans[12] - r_trans[13] - r_trans[14] - r_trans[15])/population;
+                        n12 += (r_trans[0] - s_inf_trans[0] - s_inf_trans[1])/population;
+                        n13 += (r_trans[1] - s_inf_trans[2] - s_inf_trans[3])/population;
+                        n14 += (r_trans[2] - s_inf_trans[4] - s_inf_trans[5])/population;
+                        n21 += (r_trans[4] - s_inf_trans[6] - s_inf_trans[7])/population;
+                        n23 += (r_trans[5] - s_inf_trans[8] - s_inf_trans[9])/population;
+                        n24 += (r_trans[6] - s_inf_trans[10] - s_inf_trans[11])/population;
+                        n31 += (r_trans[8] - s_inf_trans[12] - s_inf_trans[13])/population;
+                        n32 += (r_trans[9] - s_inf_trans[14] - s_inf_trans[15])/population;
+                        n34 += (r_trans[10] - s_inf_trans[16] - s_inf_trans[17])/population;
+                        n41 += (r_trans[12] - s_inf_trans[18] - s_inf_trans[19])/population;
+                        n42 += (r_trans[13] - s_inf_trans[20] - s_inf_trans[21])/population;
+                        n43 += (r_trans[14] - s_inf_trans[22] - s_inf_trans[23])/population;
+                        r += (s_inf_trans[0] + s_inf_trans[2] + s_inf_trans[4] + s_inf_trans[6] + s_inf_trans[8] + s_inf_trans[10] + s_inf_trans[12] + s_inf_trans[14] + s_inf_trans[16] + s_inf_trans[18] + s_inf_trans[20] + s_inf_trans[22] - rec_trans[0])/population;
+                        printf("%f",s + n1 + n2 + n3 + n4 + r1 + r2 + r3 + r4 + n12 + n13 + n14 + n21 + n23 + n24 + n31 + n32 + n34 + n41 + n42 + n43 + r);
+                        ')
+```
+
+# rmeasure and dmeasure
+
+```{r}
+dengue_rmeasure <- Csnippet('
+                        // measurement model of y1 given n1 + n21 + n31 + n41, for instance
+                        // y1 | n1 + n21 + n31 + n41 ~ NBin(kappa*(n1 + n2 + n31 + n41), psi)
+                        int population = 2217968;
+                        y1 = rnbinom(kappa*((n1 + n21 + n31 + n41)*population)*psi/(1-psi), psi);
+                        y2 = rnbinom(kappa*((n2 + n12 + n32 + n42)*population)*psi/(1-psi), psi);
+                        y3 = rnbinom(kappa*((n3 + n13 + n23 + n43)*population)*psi/(1-psi), psi);
+                        y4 = rnbinom(kappa*((n4 + n14 + n24 + n34)*population)*psi/(1-psi), psi);
+                            ')
+
+dengue_dmeasure <- Csnippet('
+                        // measurement density of y1 given n1 + n21 + n31 + n41, for instance
+                        // y1 | n1 + n21 + n31 + n41 ~ NBin(kappa*(n1 + n21 + n31 + n41), psi)
+                        int population = 2217968;
+                        double w1, w2, w3, w4;
+                        w1 = dnbinom(y1,kappa*((n1 + n21 + n31 + n41)*population)*psi/(1-psi), psi,give_log);
+                        w2 = dnbinom(y2,kappa*((n2 + n12 + n32 + n42)*population)*psi/(1-psi), psi,give_log);
+                        w3 = dnbinom(y3,kappa*((n3 + n13 + n23 + n43)*population)*psi/(1-psi), psi,give_log);
+                        w4 = dnbinom(y4,kappa*((n4 + n14 + n24 + n34)*population)*psi/(1-psi), psi,give_log);
+                        lik = w1*w2*w3*w4;
+                            ')
+```
+
+# constructing the pomp object
+```{r}
+
+dengue_statenames <- c("s","n1", "n2", "n3", "n4",
+                     "r1", "r2", "r3", "r4",
+                     "n12", "n13", "n14",
+                     "n21", "n23", "n24",
+                     "n31", "n32", "n34",
+                     "n41", "n42", "n43",
+                     "r")
+dengue_paramnames <- c("phi", "Gamma", "kappa", "psi")
+dengue_obsnames <- c("y1", "y2", "y3", "y4")
+dengue_fromEstimationScale <- "
+ Tphi = exp(phi) + 1;
+ TGamma = exp(Gamma) + 1;
+ Tkappa = exp(kappa);
+ Tpsi = expit(psi);
+"
+
+dengue_toEstimationScale <- "
+ Tphi = log(phi - 1);
+ TGamma = log(Gamma - 1);
+ Tkappa = log(kappa);
+ Tpsi = logit(psi);
+"
+
+dengue_initializer <- "
+ s = (0.08);
+ n1 = (0.004);
+ n2 = (0.002);
+ n3 = (0.001);
+ n4 = (0.003);
+ r1 = 0.196;
+ r2 = 0.198;
+ r3 = 0.199;
+ r4 = 0.197;
+ n12 = 0.01;  
+ n13 = 0.01;
+ n14 = 0.01;
+ n21 = 0.01;
+ n23 = 0.01;
+ n24 = 0.01;
+ n31 = 0.01;
+ n32 = 0.01;
+ n34 = 0.01;
+ n41 = 0.01;
+ n42 = 0.01;
+ n43 = 0.01;
+ r = 0;
+"
+dengue_pomp_test <- pomp(data = dd_test,
+                times = "week",
+                skeleton = map(dengue_skel, 1/7),
+                t0 = 0,
+                fromEstimationScale=Csnippet(dengue_fromEstimationScale),
+                toEstimationScale=Csnippet(dengue_toEstimationScale),
+                obsnames = dengue_obsnames,
+                statenames = dengue_statenames,
+                paramnames = dengue_paramnames,
+                initializer = Csnippet(dengue_initializer),
+                rprocess = euler.sim(
+                  step.fun = dengue_rprocess,
+                  delta.t=1/7),
+                rmeasure = dengue_rmeasure,
+                dmeasure = dengue_dmeasure
+                )
+
+dengue_pomp <- pomp(data = dd,
+                times = "week",
+                skeleton = map(dengue_skel, 1/7),
+                t0 = 0,
+                fromEstimationScale=Csnippet(dengue_fromEstimationScale),
+                toEstimationScale=Csnippet(dengue_toEstimationScale),
+                obsnames = dengue_obsnames,
+                statenames = dengue_statenames,
+                paramnames = dengue_paramnames,
+                initializer = Csnippet(dengue_initializer),
+                rprocess = euler.sim(
+                  step.fun = dengue_rprocess,
+                  delta.t=1/7),
+                rmeasure = dengue_rmeasure,
+                dmeasure = dengue_dmeasure
+                )
+
+```
+
+# Simulate from the `pomp` object
+
+```{r}
+s = simulate(dengue_pomp_test, params = c('phi' = 1.9, 'Gamma' = 1.8, 'kappa' = 0.5, 'psi' = 0.7))
+# plot(s)
+```
